@@ -166,7 +166,7 @@ update msg model =
         SelectingTeam ->
             (case msg of
                 Chosen x ->
-                    ( Loading x "wss://echo.websocket.org", Cmd.none )
+                    ( Loading x "ws://127.0.0.1:2828", Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )
