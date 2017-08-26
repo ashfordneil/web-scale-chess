@@ -12,6 +12,8 @@ extern crate toml;
 extern crate log;
 extern crate env_logger;
 
+extern crate rand;
+
 extern crate common;
 
 use slab::Slab;
@@ -30,11 +32,16 @@ use std::path::Path;
 use std::io::prelude::*;
 use std::io::{self, BufReader, ErrorKind};
 use std::env;
+use std::time::{self, Duration};
+use std::net::SocketAddr;
+
+use rand::Rng;
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-    host: String,
-    upstream: String,
+    host: SocketAddr,
+    upstream: SocketAddr,
+    vote_interval: Duration,
 }
 
 
@@ -85,6 +92,7 @@ struct State {
     upstream: Upstream,
     latest_state: Option<StateChange>,
     voting: bool,
+    next_vote: time::Instant,
 }
 
 fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
@@ -191,11 +199,6 @@ impl State {
                 }
             }
 
-            //println!("Upstream: {:?}", message);
-            println!("##############");
-            println!("{:?}", message);
-            println!("{}", self.upstream.buffer);
-
             if let DownstreamMessage::StateChange(state) = message {
                 println!("UPDATING LATEST STATE");
                 self.latest_state = Some(state);
@@ -255,6 +258,11 @@ impl State {
                 return Err(e);
             },
         };
+
+        {
+            let client = self.clients.get_mut(index).unwrap();
+            client.vote = Some(message);
+        }
 
         /*
         if let Ok(message) = message.into_text() {
@@ -329,6 +337,56 @@ impl State {
 
         Ok(())
     }
+
+    fn send_vote_upstream(&mut self) {
+        let mut voted = Vec::new();
+
+        for (index, client) in &self.clients {
+            if let Some(_) = client.vote {
+                voted.push(index);
+            }
+        }
+
+        // TODO: weighting
+        // TODO: send when 0 votes
+
+        if voted.len() == 0 {
+            return;
+        }
+
+        let index = rand::thread_rng().gen_range(0, voted.len());
+
+        let mut vote = None;
+        std::mem::swap(&mut vote, &mut self.clients.get_mut(index).unwrap().vote);
+
+        if let Some(mut vote) = vote {
+            vote.weight = voted.len() as u32;
+
+            let mut message = serde_json::to_string(&vote).unwrap();
+            message.push('\n');
+            let bytes = message.as_bytes();
+
+            println!("{}", message);
+
+            let mut sent = 0;
+            while sent < bytes.len() {
+                match self.upstream.socket.get_ref().write(&bytes[sent..]) {
+                    Ok(size) => sent += size,
+                    Err(e) => match e.kind() {
+                        ErrorKind::WouldBlock => continue,
+                        _ => {
+                            warn!("Sending message upstream failed");
+                            break;
+                        },
+                    }
+                }
+            }
+        }
+
+        for (index, client) in &mut self.clients {
+            client.vote = None;
+        }
+    }
 }
 
 fn main() {
@@ -343,13 +401,11 @@ fn main() {
 
     let config = read_config(&args[1]);
 
-    let listener_address = config.host.parse().expect("Host not a valid address");
-    let listener = TcpListener::bind(&listener_address).expect("Could not bind to host");
-    info!{"Listening on {}", listener_address};
+    let listener = TcpListener::bind(&config.host).expect("Could not bind to host");
+    info!{"Listening on {}", config.host};
 
-    let upstream_address = config.upstream.parse().expect("Upstream not a valid address");
-    let upstream_conn = TcpStream::connect(&upstream_address).expect("Could not connect to upsteam");
-    info!{"Connected to upstream {}", upstream_address};
+    let upstream_conn = TcpStream::connect(&config.upstream).expect("Could not connect to upsteam");
+    info!{"Connected to upstream {}", config.upstream};
 
     let poll = Poll::new().unwrap();
     poll.register(&listener, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
@@ -366,10 +422,21 @@ fn main() {
         upstream: Upstream::new(upstream_reader),
         latest_state: None,
         voting: false,
+        next_vote: time::Instant::now() + config.vote_interval,
     };
 
+
     loop {
-        state.poll.poll(&mut events, None).unwrap();
+        let time = time::Instant::now();
+        let mut time_until_vote;
+        if time > state.next_vote {
+            state.next_vote += config.vote_interval;
+            time_until_vote = state.next_vote - time::Instant::now();
+            state.send_vote_upstream();
+        }
+        time_until_vote = state.next_vote - time::Instant::now();
+
+        state.poll.poll(&mut events, Some(time_until_vote)).unwrap();
 
         for event in &events {
             match event.token() {

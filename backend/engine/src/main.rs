@@ -12,7 +12,7 @@ use std::fs::File;
 use std::path::Path;
 use std::net::{SocketAddr, TcpListener};
 
-use common::{PieceKind, PieceColour, Piece, Board, StateChange, Action};
+use common::{PieceKind, PieceColour, Piece, Board, StateChange, Action, Vote};
 
 #[derive(Deserialize, Debug)]
 struct Config {
@@ -111,7 +111,7 @@ fn main() {
         writeln!(&mut output, "").unwrap();
         output.flush().unwrap();
         input.read_line(&mut buffer).unwrap();
-        let action = serde_json::from_str(&*buffer).unwrap();
+        let Vote { action, .. } = serde_json::from_str(&*buffer).unwrap();
         state.turn = process_move(&mut state.board, state.turn, action);
     }
 }

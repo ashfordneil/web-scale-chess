@@ -9,8 +9,8 @@ pub struct Action {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Vote {
-    action: Action,
-    weight: u32,
+    pub action: Action,
+    pub weight: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
