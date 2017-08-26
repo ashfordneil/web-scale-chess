@@ -1,10 +1,32 @@
 extern crate common;
 extern crate serde_json;
+extern crate toml;
 
-use std::io;
+#[macro_use]
+extern crate serde_derive;
+
 use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
+use std::env;
+use std::fs::File;
+use std::path::Path;
+use std::net::{SocketAddr, TcpListener};
 
 use common::{PieceKind, PieceColour, Piece, Board, StateChange, Action};
+
+#[derive(Deserialize, Debug)]
+struct Config {
+    host: SocketAddr
+}
+
+impl Config {
+    fn from_file<P: AsRef<Path> + Clone>(path: P) -> Config {
+        let mut file = File::open(&path).expect("Could not open config file.");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).expect("Reading config file failed");
+        toml::from_str(&contents).expect("Format file incorrectly formatted")
+    }
+}
 
 fn init_board() -> Board {
     let mut inner = [[None; 8]; 8];
@@ -69,13 +91,26 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
 }
 
 fn main() {
-    let input = io::stdin();
+    let args: Vec<_> = env::args().collect();
+
+    if args.len() < 2 {
+        panic!("USAGE: engine configpath");
+    }
+    let config = Config::from_file(&args[1]);
+    let (mut input, mut output) = {
+        let listen = TcpListener::bind(config.host).unwrap();
+        let (raw_input, _) = listen.accept().unwrap();
+        (BufReader::new(raw_input.try_clone().unwrap()),
+            BufWriter::new(raw_input.try_clone().unwrap()))
+    };
+
     let mut buffer = String::new();
     let mut state = StateChange { board: init_board(), turn: PieceColour::White };
     loop {
-        serde_json::to_writer(io::stdout(), &state).unwrap();
-        println!("");
-        input.lock().read_line(&mut buffer).unwrap();
+        serde_json::to_writer(&mut output, &state).unwrap();
+        writeln!(&mut output, "").unwrap();
+        output.flush().unwrap();
+        input.read_line(&mut buffer).unwrap();
         let action = serde_json::from_str(&*buffer).unwrap();
         state.turn = process_move(&mut state.board, state.turn, action);
     }
