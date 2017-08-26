@@ -203,21 +203,51 @@ impl State {
         return Ok(());
     }
 
-    fn client_event(&mut self, event: &Event) -> io::Result<()> {
+    fn register_client_readable(&self, index: usize) -> io::Result<()> {
+        let client = self.clients.get(index).unwrap();
+
+        self.poll.register(
+            client.websocket.get_ref(),
+            client_conn_token(index),
+            Ready::readable(),
+            PollOpt::edge()
+            )
+    }
+
+    fn client_event(&mut self, event: &Event) -> Result<(), tungstenite::error::Error> {
         let index = client_conn_untoken(event.token());
-        let client = self.clients.get_mut(index).unwrap();
 
         if event.readiness().is_readable() {
-            let msg = client.websocket.read_message().unwrap();
+            let message = {
+                let mut message;
+                {
+                    let client = self.clients.get_mut(index).unwrap();
+                    message = client.websocket.read_message();
+                }
+                match message {
+                    Ok(message) => message,
+                    Err(e) => match e.into_non_blocking() {
+                        None => {
+                            self.register_client_readable(index);
+                            return Ok(());
+                        }
+                        Some(e) => {
+                            self.clients.remove(index);
+                            return Err(e);
+                        },
+                    },
+                }
+            };
 
-            if let Ok(msg) = msg.into_text() {
-                match serde_json::from_str(&msg) {
+            let client = self.clients.get_mut(index).unwrap();
+            if let Ok(message) = message.into_text() {
+                match serde_json::from_str(&message) {
                     Ok(vote) => {
                         info!("Vote received: {:?}", vote);
                         println!("{:?}", vote);
                         client.vote = Some(vote);
                     },
-                    Err(e) => warn!("Invalid message received: {}: \"{}\"", e, msg),
+                    Err(e) => warn!("Invalid message received: {}: \"{}\"", e, message),
                 }
 
                 //client.websocket.write_message(msg).unwrap();
@@ -227,17 +257,36 @@ impl State {
         }
 
         if event.readiness().is_writable() {
+            /*
             let result = client.websocket.write_pending();
             if let Err(e) = result {
                 match e.into_non_blocking() {
-                    None => self.poll.register(
-                        client.websocket.get_ref(),
-                        event.token(),
-                        Ready::readable(),
-                        PollOpt::edge()
-                        )?,
+                    None => {
+                        self.register_client_readable(index);
+                        return Ok(());
+                    },
                     Some(e) => warn!("Error sending to websocket: {:?}", e),
                 }
+            }
+            */
+
+            let mut message;
+            {
+                let client = self.clients.get_mut(index).unwrap();
+                message = client.websocket.read_message();
+            }
+            match message {
+                Ok(message) => (),
+                Err(e) => match e.into_non_blocking() {
+                    None => {
+                        self.register_client_readable(index);
+                        return Ok(());
+                    }
+                    Some(e) => {
+                        self.clients.remove(index);
+                        return Err(e);
+                    },
+                },
             }
         }
 
