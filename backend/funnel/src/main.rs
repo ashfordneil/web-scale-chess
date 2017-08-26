@@ -1,15 +1,18 @@
 extern crate slab;
 extern crate mio;
 extern crate tungstenite;
-extern crate serde_json;
 
 #[macro_use]
 extern crate serde_derive;
+
+extern crate serde_json;
 extern crate toml;
 
 #[macro_use]
 extern crate log;
 extern crate env_logger;
+
+extern crate common;
 
 use slab::Slab;
 
@@ -19,6 +22,8 @@ use mio::net::{TcpListener,TcpStream};
 use tungstenite::accept;
 use tungstenite::WebSocket;
 use tungstenite::HandshakeError::Interrupted;
+
+use common::{Vote, Action};
 
 use std::fs::File;
 use std::path::Path;
@@ -32,17 +37,6 @@ struct Config {
     upstream: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Action {
-    from: (u8, u8),
-    to: (u8, u8),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Vote {
-    action: Action,
-    weight: u32,
-}
 
 struct Client {
     vote: Option<Vote>,

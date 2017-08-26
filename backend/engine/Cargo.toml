@@ -1,0 +1,8 @@
+[package]
+name = "engine"
+version = "0.1.0"
+authors = ["Neil Ashford <ashfordneil0@gmail.com>"]
+
+[dependencies]
+
+common = { path = "../common" }

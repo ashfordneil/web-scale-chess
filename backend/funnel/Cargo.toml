@@ -1,5 +1,5 @@
 [package]
-name = "chess"
+name = "funnel"
 version = "0.1.0"
 authors = ["Justin Goldizen <justin.r.goldizen@gmail.com>"]
 
@@ -13,3 +13,4 @@ serde = "1.0.11"
 toml = "0.4.5"
 log = "0.3.8"
 env_logger = "0.4.3"
+common = { path = "../common" }
