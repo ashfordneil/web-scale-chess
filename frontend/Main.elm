@@ -1,10 +1,13 @@
 module Main exposing (Model, Msg, update, view, subscriptions, init)
 
+import Css exposing (asPairs, backgroundColor, minHeight, minWidth, px)
+import Css.Colors exposing (aqua, gray, silver)
 import Html exposing (..)
 import Html.Attributes exposing (src, style)
 import Html.Events exposing (onClick)
-import Css exposing (asPairs, backgroundColor, minHeight, minWidth, px)
-import Css.Colors exposing (aqua, gray, silver)
+import Json.Decode exposing (Decoder, decodeString)
+import Json.Decode.Pipeline exposing (decode, required)
+import WebSocket
 
 
 main : Program Never Model Msg
@@ -21,12 +24,58 @@ main =
 -- model
 
 
+colourDecoder : Decoder PieceColour
+colourDecoder =
+    Json.Decode.andThen
+        (\x ->
+            case x of
+                "White" ->
+                    Json.Decode.succeed White
+
+                "Black" ->
+                    Json.Decode.succeed Black
+
+                _ ->
+                    Json.Decode.fail "Invalid piece colour"
+        )
+        Json.Decode.string
+
+
 type PieceColour
     = White
     | Black
 
 
-type PieceType
+kindDecoder : Decoder PieceKind
+kindDecoder =
+    Json.Decode.andThen
+        (\x ->
+            case x of
+                "King" ->
+                    Json.Decode.succeed King
+
+                "Queen" ->
+                    Json.Decode.succeed Queen
+
+                "Bishop" ->
+                    Json.Decode.succeed Bishop
+
+                "Knight" ->
+                    Json.Decode.succeed Knight
+
+                "Rook" ->
+                    Json.Decode.succeed Rook
+
+                "Pawn" ->
+                    Json.Decode.succeed Pawn
+
+                _ ->
+                    Json.Decode.fail "Invalid piece type"
+        )
+        Json.Decode.string
+
+
+type PieceKind
     = King
     | Queen
     | Bishop
@@ -35,8 +84,15 @@ type PieceType
     | Pawn
 
 
+pieceDecoder : Decoder Piece
+pieceDecoder =
+    decode Piece
+        |> required "kind" kindDecoder
+        |> required "colour" colourDecoder
+
+
 type alias Piece =
-    { kind : PieceType
+    { kind : PieceKind
     , colour : PieceColour
     }
 
@@ -47,11 +103,43 @@ type ClickState
     | Done
 
 
+boardDecoder : Decoder (List (List (Maybe Piece)))
+boardDecoder =
+    Json.Decode.andThen
+        (\x ->
+            if
+                List.length x
+                    == 8
+                    && List.all
+                        (\x -> List.length x == 8)
+                        x
+            then
+                Json.Decode.succeed x
+            else
+                Json.Decode.fail "Invalid board dimensions"
+        )
+        (Json.Decode.list
+            (Json.Decode.list (Json.Decode.nullable pieceDecoder))
+        )
+
+
+type alias NetworkMessage =
+    { board : List (List (Maybe Piece)), turn : PieceColour }
+
+
+messageDecoder : Decoder NetworkMessage
+messageDecoder =
+    decode NetworkMessage
+        |> required "board" boardDecoder
+        |> required "turn" colourDecoder
+
+
 type alias Model =
     { board : List (List (Maybe Piece))
     , self : PieceColour
     , turn : PieceColour
     , clickState : ClickState
+    , url : String
     }
 
 
@@ -62,6 +150,7 @@ type alias Model =
 type Msg
     = Click Int Int
     | Unclick
+    | Transmission String
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -72,12 +161,36 @@ update msg model =
                 Unselected ->
                     ( { model | clickState = Selected x y }, Cmd.none )
 
+                Selected x1 y1 ->
+                    ( { model | clickState = Done }
+                    , WebSocket.send model.url
+                        (toString
+                            (case model.self of
+                                White ->
+                                    { from = [ x, y ], to = [ x1, y1 ] }
+
+                                Black ->
+                                    { from = [ 8 - x, 8 - y ], to = [ 8 - x1, 8 - y1 ] }
+                            )
+                        )
+                    )
+
                 _ ->
                     ( model, Cmd.none )
             )
 
         Unclick ->
             ( { model | clickState = Unselected }, Cmd.none )
+
+        Transmission msg ->
+            (case decodeString messageDecoder msg of
+                Ok update ->
+                    ( { model | board = update.board, turn = update.turn }, Cmd.none )
+
+                _ ->
+                    -- error handling is for weenies
+                    ( model, Cmd.none )
+            )
 
 
 
@@ -221,7 +334,7 @@ view model =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    Sub.none
+    WebSocket.listen model.url Transmission
 
 
 
@@ -261,4 +374,12 @@ initBoard =
 
 init : ( Model, Cmd Msg )
 init =
-    ( ({ board = initBoard, self = White, turn = White, clickState = Unselected }), Cmd.none )
+    ( ({ board = initBoard
+       , self = White
+       , turn = White
+       , clickState = Unselected
+       , url = "wss://echo.websocket.org"
+       }
+      )
+    , Cmd.none
+    )
