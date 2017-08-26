@@ -58,6 +58,20 @@ impl Client {
     }
 }
 
+struct Upstream {
+    socket: TcpStream,
+    buffer: String,
+}
+
+impl Upstream {
+    fn new(socket: TcpStream) -> Upstream {
+        Upstream {
+            socket: socket,
+            buffer: String::new(),
+        }
+    }
+}
+
 fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
     let mut file = File::open(&path)
         .expect(&format!("Could not open config file: {:?}", path.as_ref()));
@@ -68,17 +82,19 @@ fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
 
 
 const SERVER: Token = Token(0);
+const UPSTREAM: Token = Token(1);
+const FIRST_CLIENT: Token = Token(2);
 
 fn client_conn_token(index: usize) -> Token {
-    Token(index + 1)
+    Token(index + FIRST_CLIENT.0)
 }
 
 fn client_conn_untoken(token: Token) -> usize {
-    token.0 - 1
+    token.0 - FIRST_CLIENT.0
 }
 
 fn is_client(token: Token) -> bool {
-    token.0 >= 1
+    token.0 >= FIRST_CLIENT.0
 }
 
 fn new_client(poll: &Poll, listener: &TcpListener, clients: &mut Slab<Client>) -> io::Result<()> {
@@ -131,6 +147,19 @@ fn client_event(poll: &Poll, event: &Event, clients: &mut Slab<Client>) {
     }
 }
 
+fn upstream_event(poll: &Poll, event: &Event, upstream: &mut Upstream) {
+    if event.readiness().is_readable() {
+        match upstream.socket.read_to_string(&mut upstream.buffer) {
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => return,
+            result @ Err(_) => {
+                result.expect("Error reading from upstream");
+            },
+            _ => (),
+        }
+        println!("Upstream: {}", upstream.buffer);
+    }
+}
+
 fn main() {
     env_logger::init().unwrap();
 
@@ -144,16 +173,22 @@ fn main() {
     let config = read_config(&args[1]);
 
     let listener_address = config.host.parse().expect("Host not a valid address");
-    let listener = TcpListener::bind(&listener_address).unwrap();
-
+    let listener = TcpListener::bind(&listener_address).expect("Could not bind to host");
     info!{"Listening on {}", listener_address};
+
+    let upstream_address = config.upstream.parse().expect("Upstream not a valid address");
+    let upstream_conn = TcpStream::connect(&upstream_address).expect("Could not connect to upsteam");
+    upstream_conn.set_nodelay(true);
+    info!{"Connected to upstream {}", upstream_address};
 
     let poll = Poll::new().unwrap();
     poll.register(&listener, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
+    poll.register(&upstream_conn, UPSTREAM, Ready::readable(), PollOpt::level()).unwrap();
 
     let mut events = Events::with_capacity(1024);
 
     let mut clients = Slab::new();
+    let mut upstream = Upstream::new(upstream_conn);
 
     loop {
         poll.poll(&mut events, None).unwrap();
@@ -163,6 +198,8 @@ fn main() {
                 SERVER => {
                     let _ = new_client(&poll, &listener, &mut clients);
                 },
+                UPSTREAM =>
+                    upstream_event(&poll, &event, &mut upstream),
                 client @ Token(_) if is_client(client) =>
                     client_event(&poll, &event, &mut clients),
                 Token(_) =>
