@@ -19,16 +19,16 @@ use slab::Slab;
 use mio::*;
 use mio::net::{TcpListener,TcpStream};
 
-use tungstenite::accept;
-use tungstenite::WebSocket;
-use tungstenite::HandshakeError::Interrupted;
+use tungstenite::{accept, WebSocket, Message};
+use tungstenite::HandshakeError::{self, Interrupted};
+use tungstenite::util::NonBlockingError;
 
-use common::{Vote, Action};
+use common::{Vote, StateChange};
 
 use std::fs::File;
 use std::path::Path;
 use std::io::prelude::*;
-use std::io;
+use std::io::{self, BufReader, ErrorKind};
 use std::env;
 
 #[derive(Serialize, Deserialize)]
@@ -52,6 +52,40 @@ impl Client {
     }
 }
 
+struct Upstream {
+    socket: BufReader<TcpStream>,
+    buffer: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct VoteCall {
+    vote_call: (),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+enum DownstreamMessage {
+    StateChange(StateChange),
+    VoteCall(VoteCall),
+}
+
+impl Upstream {
+    fn new(socket: BufReader<TcpStream>) -> Upstream {
+        Upstream {
+            socket: socket,
+            buffer: String::new(),
+        }
+    }
+}
+
+struct State {
+    poll: Poll,
+    listener: TcpListener,
+    clients: Slab<Client>,
+    upstream: Upstream,
+    voting: bool,
+}
+
 fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
     let mut file = File::open(&path)
         .expect(&format!("Could not open config file: {:?}", path.as_ref()));
@@ -62,66 +96,152 @@ fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
 
 
 const SERVER: Token = Token(0);
+const UPSTREAM: Token = Token(1);
+const FIRST_CLIENT: Token = Token(2);
 
 fn client_conn_token(index: usize) -> Token {
-    Token(index + 1)
+    Token(index + FIRST_CLIENT.0)
 }
 
 fn client_conn_untoken(token: Token) -> usize {
-    token.0 - 1
+    token.0 - FIRST_CLIENT.0
 }
 
 fn is_client(token: Token) -> bool {
-    token.0 >= 1
+    token.0 >= FIRST_CLIENT.0
 }
 
-fn new_client(poll: &Poll, listener: &TcpListener, clients: &mut Slab<Client>) -> io::Result<()> {
-    let stream = listener.accept()?.0;
+impl State {
+    fn new_client(&mut self) -> Result<(), tungstenite::error::Error> {
+        let stream = self.listener.accept()?.0;
 
-    let mut websocket = accept(stream, None);
-    while let Err(Interrupted(in_progress)) = websocket {
-        websocket = in_progress.handshake();
+        let mut websocket = accept(stream, None);
+        while let Err(Interrupted(in_progress)) = websocket {
+            websocket = in_progress.handshake();
+        }
+        if let Err(HandshakeError::Failure(e)) = websocket {
+            return Err(e);
+        }
+        let websocket = websocket.unwrap();
+
+        let client = Client::new(websocket);
+
+        let index = self.clients.insert(client);
+        let client = self.clients.get(index).unwrap();
+        self.poll.register(
+            client.websocket.get_ref(),
+            client_conn_token(index),
+            Ready::readable(),
+            PollOpt::edge()
+            )?;
+
+        info!("Connection established: {}",
+                 client.websocket.get_ref().peer_addr()?);
+
+        Ok(())
     }
-    let websocket = websocket.unwrap();
 
-    let client = Client::new(websocket);
-
-    let index = clients.insert(client);
-    let client = clients.get(index).unwrap();
-    poll.register(
-        client.websocket.get_ref(),
-        client_conn_token(index),
-        Ready::readable(),
-        PollOpt::edge()
-        )?;
-
-    info!("Connection established: {}",
-             client.websocket.get_ref().peer_addr()?);
-
-    Ok(())
-}
-
-fn client_event(poll: &Poll, event: &Event, clients: &mut Slab<Client>) {
-    let index = client_conn_untoken(event.token());
-    let client = clients.get_mut(index).unwrap();
-
-    if event.readiness().is_readable() {
-        let msg = client.websocket.read_message().unwrap();
-
-        if let Ok(msg) = msg.into_text() {
-            match serde_json::from_str(&msg) {
-                Ok(vote) => {
-                    info!("Vote received: {:?}", vote);
-                    println!("{:?}", vote);
-                    client.vote = Some(vote);
+    fn upstream_event(&mut self, event: &Event) -> io::Result<()> {
+        if event.readiness().is_readable() {
+            match self.upstream.socket.read_line(&mut self.upstream.buffer) {
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                result @ Err(_) => {
+                    result.expect("Error reading from upstream");
                 },
-                Err(e) => warn!("Invalid message received: {}: \"{}\"", e, msg),
+                _ => (),
             }
 
-            //client.websocket.write_message(msg).unwrap();
-        } else {
-            warn!("Non-text message received");
+            let message: DownstreamMessage = match serde_json::from_str(
+                    self.upstream.buffer.trim_right()) {
+                Ok(message) => message,
+                Err(e) => {
+                    warn!("Error parsing message from upstream: {:?}: \"{}\"",
+                          e, self.upstream.buffer.trim_right());
+                    self.upstream.buffer.clear();
+                    return Ok(());
+                },
+            };
+
+            let outgoing_message = serde_json::to_string(&message).unwrap();
+            for (index, client) in &mut self.clients {
+                let result = client.websocket.write_message(Message::text(outgoing_message.clone()));
+                if let Err(e) = result {
+                    match e.into_non_blocking() {
+                        None => self.poll.register(
+                            client.websocket.get_ref(),
+                            client_conn_token(index),
+                            Ready::readable(),
+                            PollOpt::edge()
+                            )?,
+                        Some(e) => warn!("Error sending to websocket: {:?}", e),
+                    }
+                }
+/*
+                let e = match result {
+                    Err(e) => match e.into_non_blocking() {
+                        None => self.poll.register(
+                            client.websocket.get_ref(),
+                            client_conn_token(index),
+                            Ready::readable(),
+                            PollOpt::edge()
+                            )?,
+                        _ => warn!("Error sending to websocket: {:?}", a),
+                    },
+                    Ok(()) => (),
+                }
+                */
+            }
+
+            //println!("Upstream: {:?}", message);
+            println!("##############");
+            println!("{:?}", message);
+            println!("{}", self.upstream.buffer);
+
+            self.upstream.buffer.clear();
         }
+
+        return Ok(());
+    }
+
+    fn client_event(&mut self, event: &Event) -> io::Result<()> {
+        let index = client_conn_untoken(event.token());
+        let client = self.clients.get_mut(index).unwrap();
+
+        if event.readiness().is_readable() {
+            let msg = client.websocket.read_message().unwrap();
+
+            if let Ok(msg) = msg.into_text() {
+                match serde_json::from_str(&msg) {
+                    Ok(vote) => {
+                        info!("Vote received: {:?}", vote);
+                        println!("{:?}", vote);
+                        client.vote = Some(vote);
+                    },
+                    Err(e) => warn!("Invalid message received: {}: \"{}\"", e, msg),
+                }
+
+                //client.websocket.write_message(msg).unwrap();
+            } else {
+                warn!("Non-text message received");
+            }
+        }
+
+        if event.readiness().is_writable() {
+            let result = client.websocket.write_pending();
+            if let Err(e) = result {
+                match e.into_non_blocking() {
+                    None => self.poll.register(
+                        client.websocket.get_ref(),
+                        event.token(),
+                        Ready::readable(),
+                        PollOpt::edge()
+                        )?,
+                    Some(e) => warn!("Error sending to websocket: {:?}", e),
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -138,27 +258,44 @@ fn main() {
     let config = read_config(&args[1]);
 
     let listener_address = config.host.parse().expect("Host not a valid address");
-    let listener = TcpListener::bind(&listener_address).unwrap();
-
+    let listener = TcpListener::bind(&listener_address).expect("Could not bind to host");
     info!{"Listening on {}", listener_address};
+
+    let upstream_address = config.upstream.parse().expect("Upstream not a valid address");
+    let upstream_conn = TcpStream::connect(&upstream_address).expect("Could not connect to upsteam");
+    info!{"Connected to upstream {}", upstream_address};
 
     let poll = Poll::new().unwrap();
     poll.register(&listener, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
+    poll.register(&upstream_conn, UPSTREAM, Ready::readable(), PollOpt::edge()).unwrap();
 
     let mut events = Events::with_capacity(1024);
 
-    let mut clients = Slab::new();
+    let upstream_reader = BufReader::new(upstream_conn);
+
+    let mut state = State {
+        poll: poll,
+        listener: listener,
+        clients: Slab::new(),
+        upstream: Upstream::new(upstream_reader),
+        voting: false,
+    };
 
     loop {
-        poll.poll(&mut events, None).unwrap();
+        state.poll.poll(&mut events, None).unwrap();
 
         for event in &events {
             match event.token() {
-                SERVER => {
-                    let _ = new_client(&poll, &listener, &mut clients);
+                SERVER => match state.new_client() {
+                    Err(e) => warn!("Client accept failed: {:?}", e),
+                    _ => (),
                 },
-                client @ Token(_) if is_client(client) =>
-                    client_event(&poll, &event, &mut clients),
+                UPSTREAM => {
+                    let _ = state.upstream_event(&event);
+                },
+                client @ Token(_) if is_client(client) => {
+                    let _ = state.client_event(&event);
+                }
                 Token(_) =>
                     (),
             }
