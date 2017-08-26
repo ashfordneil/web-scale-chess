@@ -1,4 +1,4 @@
-module Main exposing (Model, Msg, update, view, subscriptions, init)
+module Main exposing (GameModel, Msg, update, view, subscriptions, init)
 
 import Css exposing (asPairs, backgroundColor, minHeight, minWidth, px)
 import Css.Colors exposing (aqua, gray, silver)
@@ -134,7 +134,7 @@ messageDecoder =
         |> required "turn" colourDecoder
 
 
-type alias Model =
+type alias GameModel =
     { board : List (List (Maybe Piece))
     , self : PieceColour
     , turn : PieceColour
@@ -143,53 +143,87 @@ type alias Model =
     }
 
 
+type Model
+    = SelectingTeam
+    | Loading PieceColour String
+    | InGame GameModel
+
+
 
 -- update and messages
 
 
 type Msg
-    = Click Int Int
+    = Chosen PieceColour
+    | Click Int Int
     | Unclick
     | Transmission String
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    case msg of
-        Click x y ->
-            (case model.clickState of
-                Unselected ->
-                    ( { model | clickState = Selected x y }, Cmd.none )
-
-                Selected x1 y1 ->
-                    ( { model | clickState = Done }
-                    , WebSocket.send model.url
-                        (toString
-                            (case model.self of
-                                White ->
-                                    { from = [ x, y ], to = [ x1, y1 ] }
-
-                                Black ->
-                                    { from = [ 8 - x, 8 - y ], to = [ 8 - x1, 8 - y1 ] }
-                            )
-                        )
-                    )
+    case model of
+        SelectingTeam ->
+            (case msg of
+                Chosen x ->
+                    ( Loading x "wss://echo.websocket.org", Cmd.none )
 
                 _ ->
                     ( model, Cmd.none )
             )
 
-        Unclick ->
-            ( { model | clickState = Unselected }, Cmd.none )
+        Loading team url ->
+            (case msg of
+                Transmission msg ->
+                    (case decodeString messageDecoder msg of
+                        Ok update ->
+                            (InGame { board = update.board, turn = update.turn, url = url, self = team, clickState = Unselected}, Cmd.none)
+                        _ ->
+                            -- error handling is for weenies part 2
+                            (Loading team url, Cmd.none)
+                    )
+                _ -> (model, Cmd.none)
+            )
 
-        Transmission msg ->
-            (case decodeString messageDecoder msg of
-                Ok update ->
-                    ( { model | board = update.board, turn = update.turn }, Cmd.none )
+        InGame model ->
+            (case msg of
+                Click x y ->
+                    (case model.clickState of
+                        Unselected ->
+                            ( InGame { model | clickState = Selected x y }, Cmd.none )
 
-                _ ->
-                    -- error handling is for weenies
-                    ( model, Cmd.none )
+                        Selected x1 y1 ->
+                            ( InGame { model | clickState = Done }
+                            , WebSocket.send model.url
+                                (toString
+                                    (case model.self of
+                                        White ->
+                                            { from = [ x, y ], to = [ x1, y1 ] }
+
+                                        Black ->
+                                            { from = [ 8 - x, 8 - y ], to = [ 8 - x1, 8 - y1 ] }
+                                    )
+                                )
+                            )
+
+                        _ ->
+                            ( InGame model, Cmd.none )
+                    )
+
+                Unclick ->
+                    ( InGame { model | clickState = Unselected }, Cmd.none )
+
+                Transmission msg ->
+                    (case decodeString messageDecoder msg of
+                        Ok update ->
+                            ( InGame { model | board = update.board, turn = update.turn }, Cmd.none )
+
+                        _ ->
+                            -- error handling is for weenies
+                            ( InGame model, Cmd.none )
+                    )
+
+                _ -> (InGame model, Cmd.none)
             )
 
 
@@ -306,8 +340,8 @@ renderBoard selectedX selectedY board =
         )
 
 
-view : Model -> Html Msg
-view model =
+viewGame : GameModel -> Html Msg
+viewGame model =
     let
         ( x, y ) =
             case model.clickState of
@@ -328,13 +362,30 @@ view model =
                 renderBoard x y (model.board |> List.reverse |> List.map List.reverse)
 
 
+view : Model -> Html Msg
+view model =
+    case model of
+        SelectingTeam -> 
+        let buttonStyle = styles [Css.padding (px 50), Css.margin (px 50)]
+        in div [] [button 
+            [onClick (Chosen White), buttonStyle] [text "I want to play for the white team"]
+            , button [onClick (Chosen Black), buttonStyle] [text "I want to play for the black team"]]
+
+        Loading _ _ -> text "Loading"
+
+        InGame m ->
+            viewGame m
+
 
 -- subscriptions
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    WebSocket.listen model.url Transmission
+    case model of
+        SelectingTeam -> Sub.none
+        Loading _ url -> WebSocket.listen url Transmission
+        InGame model -> WebSocket.listen model.url Transmission
 
 
 
@@ -374,12 +425,6 @@ initBoard =
 
 init : ( Model, Cmd Msg )
 init =
-    ( ({ board = initBoard
-       , self = White
-       , turn = White
-       , clickState = Unselected
-       , url = "wss://echo.websocket.org"
-       }
-      )
+    ( SelectingTeam
     , Cmd.none
     )
