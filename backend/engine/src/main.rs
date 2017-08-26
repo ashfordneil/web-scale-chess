@@ -287,9 +287,39 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
                 info!("Move rejected as the rook must move in a straight line");
                 return turn;
             },
-            PieceKind::Pawn => {}
+            PieceKind::Pawn => if dx == 0 {
+                if (dy == 1 && colour == PieceColour::Black &&
+                    inner[y1 as usize][x1 as usize].is_none()) ||
+                    (dy == -1 && colour == PieceColour::White &&
+                        inner[y1 as usize][x1 as usize].is_none())
+                {
+                    // pawn just moving forwards, minding its business
+                } else if (dy == 2 && colour == PieceColour::Black && y0 == 1 &&
+                    !piece_between(&inner, (x0, y0), (x0, y0 + 3))) ||
+                    (dy == 2 && colour == PieceColour::White && y0 == 6 &&
+                        !piece_between(&inner, (x0, y0), (x0, y0 - 3)))
+                {
+                    // pawn just moving forwards - twice
+                } else if dx.abs() == 1 {
+                    match colour {
+                        PieceColour::White => if dy != -1 ||
+                            inner[y1 as usize][x1 as usize].is_none() ||
+                            inner[y1 as usize][x1 as usize].unwrap().colour != PieceColour::Black
+                        {
+                            info!("Pawn can only move in the X direction if its capturing");
+                            return turn;
+                        },
+                        PieceColour::Black => if dy != 1 ||
+                            inner[y1 as usize][x1 as usize].is_none() ||
+                            inner[y1 as usize][x1 as usize].unwrap().colour != PieceColour::White
+                        {
+                            info!("Pawn can only move in the X direction if its capturing");
+                            return turn;
+                        },
+                    }
+                }
+            },
         }
-        inner[y1 as usize][x1 as usize] = Some(Piece { kind, colour });
     } else {
         info!(
             "Cannot move piece at coordinates ({}, {}) as there is no piece there",
@@ -298,6 +328,8 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
         );
         return turn;
     }
+
+    inner[y1 as usize][x1 as usize] = inner[y0 as usize][x0 as usize].take();
 
     match turn {
         PieceColour::White => PieceColour::Black,
@@ -329,6 +361,9 @@ fn main() {
     };
     loop {
         let mut buffer = String::new();
+        #[cfg(debug)]
+        serde_json::to_writer_pretty(&mut output, &state).unwrap();
+        #[cfg(not(debug))]
         serde_json::to_writer(&mut output, &state).unwrap();
         writeln!(&mut output, "").unwrap();
         output.flush().unwrap();
