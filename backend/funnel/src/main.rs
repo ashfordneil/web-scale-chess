@@ -176,12 +176,14 @@ impl State {
                     self.upstream.buffer.trim_right()) {
                 Ok(message) => message,
                 Err(e) => {
-                    warn!("Error parsing message from upstream: {:?}: \"{}\"",
+                    warn!("Badly formatted message from upstream: {:?}: \"{}\"",
                           e, self.upstream.buffer.trim_right());
                     self.upstream.buffer.clear();
                     return Ok(());
                 },
             };
+
+            info!("Received from upstream: {:?}", message);
 
             let outgoing_message = serde_json::to_string(&message).unwrap();
             for (index, client) in &mut self.clients {
@@ -245,19 +247,40 @@ impl State {
             }
         };
 
-        let message: Vote = match message.into_text() {
-            Ok(text) => match serde_json::from_str(&text) {
-                Ok(decoded) => decoded,
+        let message = match message {
+            Message::Text(text) => match serde_json::from_str(&text) {
+                Ok(decoded) => {
+                    info!("Received text from client: {:?}", decoded);
+                    decoded
+                }
                 Err(e) => {
-                    warn!("Non-text message received {}", e);
+                    warn!("Badly formatted text received from client {}", e);
                     return Ok(());
                 }
             },
-            Err(e) => {
+            Message::Binary(vec) => match serde_json::from_str(std::str::from_utf8(&vec).unwrap()) {
+                Ok(decoded) => {
+                    info!("Received binary from client: {:?}", decoded);
+                    decoded
+                }
+                Err(e) => {
+                    warn!("Badly formatted binary received from client {}", e);
+                    return Ok(());
+                }
+            },
+            _ => panic!("dammit no ping pong"),
+        };
+
+
+/*
+
+        let message: Vote = match message.into_text() {
+            Ok(text) =>             Err(e) => {
                 warn!("Non-text message received {}", e);
                 return Err(e);
             },
         };
+        */
 
         {
             let client = self.clients.get_mut(index).unwrap();
@@ -354,6 +377,8 @@ impl State {
             return;
         }
 
+        info!("Sending votes for {} upstream", voted.len());
+
         let index = rand::thread_rng().gen_range(0, voted.len());
 
         let mut vote = None;
@@ -381,6 +406,8 @@ impl State {
                     }
                 }
             }
+
+            info!("Votes sent!");
         }
 
         for (index, client) in &mut self.clients {
