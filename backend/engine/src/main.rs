@@ -182,16 +182,25 @@ fn piece_between<T>(board: &[[Option<T>; 8]; 8], start: (u8, u8), stop: (u8, u8)
     assert!(dx != 0 || dy != 0);
 
     if dx.abs() == dy.abs() {
-        let xs: Box<Iterator<Item = u8>> = if dx > 0 { Box::new(x0 + 1..x1) } else { Box::new((x0 + 1..x1).rev()) };
-        let ys: Box<Iterator<Item = u8>> = if dy > 0 { Box::new(y0 + 1..y1) } else { Box::new((y0 + 1..y1).rev()) };
+        let xs: Box<Iterator<Item = u8>> = if dx > 0 {
+            Box::new(x0 + 1..x1)
+        } else {
+            Box::new((x0 + 1..x1).rev())
+        };
+        let ys: Box<Iterator<Item = u8>> = if dy > 0 {
+            Box::new(y0 + 1..y1)
+        } else {
+            Box::new((y0 + 1..y1).rev())
+        };
         match xs.zip(ys)
-            .find(|&(x, y)| board[y as usize][x as usize].is_some()) {
-                Some((x, y)) => {
-                    info!("Diagonal collision at ({},{})", x, y);
-                    true
-                },
-                _ => false
+            .find(|&(x, y)| board[y as usize][x as usize].is_some())
+        {
+            Some((x, y)) => {
+                info!("Diagonal collision at ({},{})", x, y);
+                true
             }
+            _ => false,
+        }
     } else {
         (dx == 0 && dy > 0 &&
             board[y0 as usize + 1..y1 as usize]
@@ -223,7 +232,14 @@ fn process_sans_check_check(
 ) -> bool {
     let (x0, y0) = from;
     let (x1, y1) = to;
-    debug!("({},{}), ({},{}) -> {:?}", x0, y0, x1, y1, board[y0 as usize][x0 as usize]);
+    debug!(
+        "({},{}), ({},{}) -> {:?}",
+        x0,
+        y0,
+        x1,
+        y1,
+        board[y0 as usize][x0 as usize]
+    );
 
     if let Some(Piece { kind, colour }) = board[y0 as usize][x0 as usize] {
         if colour != turn {
@@ -302,7 +318,7 @@ fn process_sans_check_check(
                         board[y1 as usize][x1 as usize].is_none())
                 {
                     debug!("Pawn moving 1 square");
-                    // pawn just moving forwards, minding its business
+                // pawn just moving forwards, minding its business
                 } else if (dy == 2 && colour == PieceColour::Black && y0 == 1 &&
                     !piece_between(&board, (x0, y0), (x0, y0 + 3))) ||
                     (dy == -2 && colour == PieceColour::White && y0 == 6 &&
@@ -397,10 +413,17 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
         .next()
         .unwrap();
 
-    if let Some((x, y)) = (0..8).cartesian_product((0..8)).find(|&pos| process_sans_check_check(&inner, pos, king_pos, not_turn)) {
-        info!("Cannot move into check. Vulnerable from piece at ({}, {})", x, y);
+    if let Some((x, y)) = (0..8).cartesian_product((0..8)).find(|&pos| {
+        process_sans_check_check(&inner, pos, king_pos, not_turn)
+    }) {
+        info!(
+            "Cannot move into check. Vulnerable from piece at ({}, {})",
+            x,
+            y
+        );
         return turn;
     }
+
 
 
     inner[y1 as usize][x1 as usize] = inner[y0 as usize][x0 as usize].take();
@@ -444,6 +467,18 @@ fn main() {
         debug!("New move: {:?} (weight = {})", action, weight);
         if weight > 0 {
             state.turn = process_move(&mut state.board, state.turn, action);
+            let mut other_board = state.board.to_owned();
+            if !(0..8)
+                .cartesian_product((0..8))
+                .cartesian_product((0..8).cartesian_product((0..8)))
+                .map(|(from, to)| Action { from, to })
+                .any(|action| {
+                    process_move(&mut other_board, state.turn, action) != state.turn
+                }) {
+                info!("Checkmate. Winner {:?}", state.turn);
+                state.board = init_board();
+                state.turn = PieceColour::White;
+            }
         }
     }
 }
