@@ -1,6 +1,7 @@
 extern crate common;
 extern crate serde_json;
 extern crate toml;
+extern crate itertools;
 
 #[macro_use]
 extern crate serde_derive;
@@ -16,7 +17,9 @@ use std::fs::File;
 use std::path::Path;
 use std::net::{SocketAddr, TcpListener};
 
-use common::{PieceKind, PieceColour, Piece, Board, StateChange, Action, Vote};
+use common::{Action, Board, Piece, PieceColour, PieceKind, StateChange, Vote};
+
+use itertools::Itertools;
 
 #[derive(Deserialize, Debug)]
 struct Config {
@@ -179,10 +182,16 @@ fn piece_between<T>(board: &[[Option<T>; 8]; 8], start: (u8, u8), stop: (u8, u8)
     assert!(dx != 0 || dy != 0);
 
     if dx.abs() == dy.abs() {
-        let xs = if dx > 0 { x0 + 1..x1 } else { x1 + 1..x0 };
-        let ys = if dy > 0 { y0 + 1..y1 } else { y1 + 1..y0 };
-        xs.zip(ys)
-            .any(|(x, y)| board[y as usize][x as usize].is_some())
+        let xs: Box<Iterator<Item = u8>> = if dx > 0 { Box::new(x0 + 1..x1) } else { Box::new((x0 + 1..x1).rev()) };
+        let ys: Box<Iterator<Item = u8>> = if dy > 0 { Box::new(y0 + 1..y1) } else { Box::new((y0 + 1..y1).rev()) };
+        match xs.zip(ys)
+            .find(|&(x, y)| board[y as usize][x as usize].is_some()) {
+                Some((x, y)) => {
+                    info!("Diagonal collision at ({},{})", x, y);
+                    true
+                },
+                _ => false
+            }
     } else {
         (dx == 0 && dy > 0 &&
             board[y0 as usize + 1..y1 as usize]
@@ -205,26 +214,25 @@ fn piece_between<T>(board: &[[Option<T>; 8]; 8], start: (u8, u8), stop: (u8, u8)
     }
 }
 
-fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceColour {
-    let Action {
-        from: (x0, y0),
-        to: (x1, y1),
-    } = action;
-    let &mut Board(ref mut inner) = board;
+/// Returns true if a move is possible (excluding check) and false otherwise
+fn process_sans_check_check(
+    board: &[[Option<Piece>; 8]; 8],
+    from: (u8, u8),
+    to: (u8, u8),
+    turn: PieceColour,
+) -> bool {
+    let (x0, y0) = from;
+    let (x1, y1) = to;
+    debug!("({},{}), ({},{}) -> {:?}", x0, y0, x1, y1, board[y0 as usize][x0 as usize]);
 
-    if x0 >= 8 || x1 >= 8 || y0 >= 8 || y1 >= 8 {
-        // das bad
-        return turn;
-    }
-
-    if let Some(Piece { kind, colour }) = inner[y0 as usize][x0 as usize] {
+    if let Some(Piece { kind, colour }) = board[y0 as usize][x0 as usize] {
         if colour != turn {
             info!(
                 "Move rejected as piece colour ({:?}) != current turn player ({:?})",
                 colour,
                 turn
             );
-            return turn;
+            return false;
         }
 
         if x0 == x1 && y0 == y1 {
@@ -235,7 +243,7 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
                 x1,
                 y1
             );
-            return turn;
+            return false;
         }
 
         let dx = x1 as i8 - x0 as i8;
@@ -247,26 +255,26 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
                     // no possible way to be moving through things if you only move 1 square
                 } else {
                     info!("Move rejected as king cannot move more than 1 square");
-                    return turn;
+                    return false;
                 }
             }
             PieceKind::Queen => if dx == 0 || dy == 0 || dx.abs() == dy.abs() {
-                if piece_between(&inner, (x0, y0), (x1, y1)) {
+                if piece_between(&board, (x0, y0), (x1, y1)) {
                     info!("Move rejected as there is a piece in front of the queen");
-                    return turn;
+                    return false;
                 }
             } else {
                 info!("Move rejected as the queen must move in a straight line");
-                return turn;
+                return false;
             },
             PieceKind::Bishop => if dx.abs() == dy.abs() {
-                if piece_between(&inner, (x0, y0), (x1, y1)) {
+                if piece_between(&board, (x0, y0), (x1, y1)) {
                     info!("Move rejected as there is a piece in front of the bishop");
-                    return turn;
+                    return false;
                 }
             } else {
                 info!("Move rejected as the bishop must move in a diagonal line");
-                return turn;
+                return false;
             },
             PieceKind::Knight => {
                 if dx.abs() == 2 && dy.abs() == 1 {
@@ -275,55 +283,67 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
                     // horsy can jump over things
                 } else {
                     info!("Move rejected as horsy must move in an L");
-                    return turn;
+                    return false;
                 }
             }
             PieceKind::Rook => if dx == 0 || dy == 0 {
-                if piece_between(&inner, (x0, y0), (x1, y1)) {
+                if piece_between(&board, (x0, y0), (x1, y1)) {
                     info!("Move rejected as there is a piece in front of the rook");
-                    return turn;
+                    return false;
                 }
             } else {
                 info!("Move rejected as the rook must move in a straight line");
-                return turn;
+                return false;
             },
             PieceKind::Pawn => if dx == 0 {
                 if (dy == 1 && colour == PieceColour::Black &&
-                    inner[y1 as usize][x1 as usize].is_none()) ||
+                    board[y1 as usize][x1 as usize].is_none()) ||
                     (dy == -1 && colour == PieceColour::White &&
-                        inner[y1 as usize][x1 as usize].is_none())
+                        board[y1 as usize][x1 as usize].is_none())
                 {
+                    debug!("Pawn moving 1 square");
                     // pawn just moving forwards, minding its business
                 } else if (dy == 2 && colour == PieceColour::Black && y0 == 1 &&
-                    !piece_between(&inner, (x0, y0), (x0, y0 + 3))) ||
-                    (dy == 2 && colour == PieceColour::White && y0 == 6 &&
-                        !piece_between(&inner, (x0, y0), (x0, y0 - 3)))
+                    !piece_between(&board, (x0, y0), (x0, y0 + 3))) ||
+                    (dy == -2 && colour == PieceColour::White && y0 == 6 &&
+                        !piece_between(&board, (x0, y0), (x0, y0 - 3)))
                 {
                     // pawn just moving forwards - twice
+                    debug!("Pawn moving 2 squares");
                 } else if dx.abs() == 1 {
+                    debug!("Pawn capturing");
                     match colour {
                         PieceColour::White => if dy != -1 ||
-                            inner[y1 as usize][x1 as usize].is_none() ||
-                            inner[y1 as usize][x1 as usize].unwrap().colour != PieceColour::Black
+                            board[y1 as usize][x1 as usize].is_none() ||
+                            board[y1 as usize][x1 as usize].unwrap().colour != PieceColour::Black
                         {
                             info!("Pawn can only move in the X direction if its capturing");
-                            return turn;
+                            return false;
                         },
                         PieceColour::Black => if dy != 1 ||
-                            inner[y1 as usize][x1 as usize].is_none() ||
-                            inner[y1 as usize][x1 as usize].unwrap().colour != PieceColour::White
+                            board[y1 as usize][x1 as usize].is_none() ||
+                            board[y1 as usize][x1 as usize].unwrap().colour != PieceColour::White
                         {
                             info!("Pawn can only move in the X direction if its capturing");
-                            return turn;
+                            return false;
                         },
                     }
+                } else {
+                    info!("Pawns cannot move like that");
+                    return false;
                 }
+            } else {
+                info!("Pawns cannot move like that");
+                return false;
             },
         }
 
-        if inner[y1 as usize][x1 as usize].iter().any(|x| x.colour == colour) {
+        if board[y1 as usize][x1 as usize]
+            .iter()
+            .any(|x| x.colour == colour)
+        {
             info!("Cannot take your own piece");
-            return turn;
+            return false;
         }
     } else {
         info!(
@@ -331,16 +351,61 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
             x0,
             y0
         );
+        return false;
+    }
+
+    true
+}
+
+fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceColour {
+    let not_turn = match turn {
+        PieceColour::White => PieceColour::Black,
+        PieceColour::Black => PieceColour::White,
+    };
+    let Action {
+        from: (x0, y0),
+        to: (x1, y1),
+    } = action;
+    let &mut Board(ref mut inner) = board;
+
+    if x0 >= 8 || x1 >= 8 || y0 >= 8 || y1 >= 8 {
+        // das bad
+        return turn;
+    }
+
+    if !process_sans_check_check(&inner, (x0, y0), (x1, y1), turn) {
+        return turn;
+    }
+
+    let king_pos = inner
+        .iter()
+        .enumerate()
+        .filter_map(|(y, &row)| {
+            row.iter()
+                .enumerate()
+                .filter_map(|(x, piece)| {
+                    piece.and_then(|Piece { kind, colour }| {
+                        if kind == PieceKind::King && colour == turn {
+                            Some((x as u8, y as u8))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .next()
+        })
+        .next()
+        .unwrap();
+
+    if let Some((x, y)) = (0..8).cartesian_product((0..8)).find(|&pos| process_sans_check_check(&inner, pos, king_pos, not_turn)) {
+        info!("Cannot move into check. Vulnerable from piece at ({}, {})", x, y);
         return turn;
     }
 
 
     inner[y1 as usize][x1 as usize] = inner[y0 as usize][x0 as usize].take();
 
-    match turn {
-        PieceColour::White => PieceColour::Black,
-        PieceColour::Black => PieceColour::White,
-    }
+    not_turn
 }
 
 fn main() {

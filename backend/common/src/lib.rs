@@ -13,7 +13,7 @@ pub struct Vote {
     pub weight: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PieceKind {
     King,
     Queen,
