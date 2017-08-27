@@ -177,42 +177,54 @@ update msg model =
                 Transmission msg ->
                     (case decodeString messageDecoder msg of
                         Ok update ->
-                            (InGame { board = update.board
-                                    , turn = update.turn
-                                    , url = url
-                                    , self = team
-                                    , clickState = Unselected}
-                            , Cmd.none)
+                            ( InGame
+                                { board = update.board
+                                , turn = update.turn
+                                , url = url
+                                , self = team
+                                , clickState = Unselected
+                                }
+                            , Cmd.none
+                            )
 
                         _ ->
                             -- error handling is for weenies part 2
-                            (Loading team url, Cmd.none)
+                            ( Loading team url, Cmd.none )
                     )
-                _ -> (model, Cmd.none)
+
+                _ ->
+                    ( model, Cmd.none )
             )
 
         InGame model ->
             (case msg of
                 Click x y ->
-                    if model.turn == model.self then (case model.clickState of
-                        Unselected ->
-                            ( InGame { model | clickState = Selected x y }, Cmd.none )
+                    if model.turn == model.self then
+                        (case model.clickState of
+                            Unselected ->
+                                ( InGame { model | clickState = Selected x y }, Cmd.none )
 
-                        Selected x0 y0 ->
-                            ( InGame { model | clickState = Done }
-                            , WebSocket.send model.url (
-                                let (old, new) = case model.self of
-                                    White ->
-                                        ([x0, y0], [x, y])
-                                    
-                                    Black ->
-                                        ([7 - x0, 7 - y0], [7 - x, 7 - y])
-                                in ("{\"action\": {\"from\": " ++ toString old ++ ", \"to\": " ++ toString new ++ "}, \"weight\": 1}"))
-                            )
+                            Selected x0 y0 ->
+                                ( InGame { model | clickState = Done }
+                                , WebSocket.send model.url
+                                    (let
+                                        ( old, new ) =
+                                            case model.self of
+                                                White ->
+                                                    ( [ x0, y0 ], [ x, y ] )
 
-                        _ ->
-                            ( InGame model, Cmd.none )
-                    ) else ( InGame model, Cmd.none )
+                                                Black ->
+                                                    ( [ 7 - x0, 7 - y0 ], [ 7 - x, 7 - y ] )
+                                     in
+                                        ("{\"action\": {\"from\": " ++ toString old ++ ", \"to\": " ++ toString new ++ "}, \"weight\": 1}")
+                                    )
+                                )
+
+                            _ ->
+                                ( InGame model, Cmd.none )
+                        )
+                    else
+                        ( InGame model, Cmd.none )
 
                 Unclick ->
                     ( InGame { model | clickState = Unselected }, Cmd.none )
@@ -220,14 +232,28 @@ update msg model =
                 Transmission msg ->
                     (case decodeString messageDecoder msg of
                         Ok update ->
-                            ( InGame { model | board = update.board, turn = update.turn, clickState = Unselected }, Cmd.none )
+                            let
+                                newClickState =
+                                    if update.turn == model.self then
+                                        (case model.clickState of
+                                            Selected x y ->
+                                                Selected x y
+
+                                            _ ->
+                                                Unselected
+                                        )
+                                    else
+                                        Unselected
+                            in
+                                ( InGame { model | board = update.board, turn = update.turn, clickState = newClickState }, Cmd.none )
 
                         _ ->
                             -- error handling is for weenies
                             ( InGame model, Cmd.none )
                     )
 
-                _ -> (InGame model, Cmd.none)
+                _ ->
+                    ( InGame model, Cmd.none )
             )
 
 
@@ -310,7 +336,7 @@ renderSquare x y highlighted elem =
                 silver
 
         piece =
-            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> (\x -> img [x] []) >> List.singleton) elem)
+            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> (\x -> img [ x ] []) >> List.singleton) elem)
 
         event =
             if highlighted then
@@ -359,46 +385,72 @@ viewGame model =
 
                 Selected x y ->
                     ( x, y )
-        board = case model.self of
-            White ->
-                renderBoard x y model.board
 
-            Black ->
-                renderBoard x y (model.board |> List.reverse |> List.map List.reverse)
-        header = p [] [text (case model.turn of
-            White ->
-                "It is white's turn."
-            Black ->
-                "It is black's turn."
-        )]
-        has_moved = p [] [text (case model.clickState of
-            Unselected ->
-                if model.turn == model.self then "Please make a move." else "It is not your turn."
-            Selected _ _  ->
-                ""
-            Done ->
-                "You have made your move. Please wait for the next turn."
-        )]
+        board =
+            case model.self of
+                White ->
+                    renderBoard x y model.board
+
+                Black ->
+                    renderBoard x y (model.board |> List.reverse |> List.map List.reverse)
+
+        header =
+            p []
+                [ text
+                    (case model.turn of
+                        White ->
+                            "It is white's turn."
+
+                        Black ->
+                            "It is black's turn."
+                    )
+                ]
+
+        has_moved =
+            p []
+                [ text
+                    (case model.clickState of
+                        Unselected ->
+                            if model.turn == model.self then
+                                "Please make a move."
+                            else
+                                "It is not your turn."
+
+                        Selected _ _ ->
+                            ""
+
+                        Done ->
+                            "You have made your move. Please wait for the next turn."
+                    )
+                ]
     in
-        div [styles [Css.padding (vw 5)]] 
-        [ div [styles [Css.padding (px 20 )]] [header , has_moved]
-        , board
-        ]
+        div [ styles [ Css.padding (vw 5) ] ]
+            [ div [ styles [ Css.padding (px 20) ] ] [ header, has_moved ]
+            , board
+            ]
 
 
 view : Model -> Html Msg
 view model =
     case model of
-        SelectingTeam -> 
-        let buttonStyle = styles [Css.padding (px 50), Css.margin (px 50)]
-        in div [] [button 
-            [onClick (Chosen White), buttonStyle] [text "I want to play for the white team"]
-            , button [onClick (Chosen Black), buttonStyle] [text "I want to play for the black team"]]
+        SelectingTeam ->
+            let
+                buttonStyle =
+                    styles [ Css.padding (px 50), Css.margin (px 50) ]
+            in
+                div []
+                    [ button
+                        [ onClick (Chosen White), buttonStyle ]
+                        [ text "I want to play for the white team" ]
+                    , button [ onClick (Chosen Black), buttonStyle ] [ text "I want to play for the black team" ]
+                    ]
 
-        Loading _ _ -> text "Loading"
+        Loading _ _ ->
+            text "Loading"
 
         InGame m ->
             viewGame m
+
 
 
 -- subscriptions
@@ -407,9 +459,14 @@ view model =
 subscriptions : Model -> Sub Msg
 subscriptions model =
     case model of
-        SelectingTeam -> Sub.none
-        Loading _ url -> WebSocket.listen url Transmission
-        InGame model -> WebSocket.listen model.url Transmission
+        SelectingTeam ->
+            Sub.none
+
+        Loading _ url ->
+            WebSocket.listen url Transmission
+
+        InGame model ->
+            WebSocket.listen model.url Transmission
 
 
 

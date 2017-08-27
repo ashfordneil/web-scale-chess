@@ -179,13 +179,13 @@ fn piece_between<T>(board: &[[Option<T>; 8]; 8], start: (u8, u8), stop: (u8, u8)
     assert!(dx != 0 || dy != 0);
 
     if dx.abs() == dy.abs() {
-        let xs = if dx > 0 { x0..x1 } else { x1 + 1..x0 };
-        let ys = if dy > 0 { y0..y1 } else { y1 + 1..y0 };
+        let xs = if dx > 0 { x0 + 1..x1 } else { x1 + 1..x0 };
+        let ys = if dy > 0 { y0 + 1..y1 } else { y1 + 1..y0 };
         xs.zip(ys)
             .any(|(x, y)| board[y as usize][x as usize].is_some())
     } else {
         (dx == 0 && dy > 0 &&
-            board[y0 as usize..y1 as usize]
+            board[y0 as usize + 1..y1 as usize]
                 .iter()
                 .map(|x| &x[x0 as usize])
                 .any(|x| x.is_some())) ||
@@ -195,7 +195,7 @@ fn piece_between<T>(board: &[[Option<T>; 8]; 8], start: (u8, u8), stop: (u8, u8)
                     .map(|x| &x[x0 as usize])
                     .any(|x| x.is_some())) ||
             (dy == 0 && dx > 0 &&
-                board[y0 as usize][x0 as usize..x1 as usize]
+                board[y0 as usize][x0 as usize + 1..x1 as usize]
                     .iter()
                     .any(|x| x.is_some())) ||
             (dy == 0 && dx < 0 &&
@@ -320,6 +320,11 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
                 }
             },
         }
+
+        if inner[y1 as usize][x1 as usize].iter().any(|x| x.colour == colour) {
+            info!("Cannot take your own piece");
+            return turn;
+        }
     } else {
         info!(
             "Cannot move piece at coordinates ({}, {}) as there is no piece there",
@@ -328,6 +333,7 @@ fn process_move(board: &mut Board, turn: PieceColour, action: Action) -> PieceCo
         );
         return turn;
     }
+
 
     inner[y1 as usize][x1 as usize] = inner[y0 as usize][x0 as usize].take();
 
