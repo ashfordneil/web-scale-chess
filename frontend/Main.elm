@@ -1,6 +1,6 @@
 module Main exposing (GameModel, Msg, update, view, subscriptions, init)
 
-import Css exposing (asPairs, backgroundColor, minHeight, minWidth, px)
+import Css exposing (asPairs, backgroundColor, maxHeight, maxWidth, minHeight, minWidth, px, vw)
 import Css.Colors exposing (aqua, gray, silver)
 import Html exposing (..)
 import Html.Attributes exposing (src, style)
@@ -194,7 +194,7 @@ update msg model =
         InGame model ->
             (case msg of
                 Click x y ->
-                    (case model.clickState of
+                    if model.turn == model.self then (case model.clickState of
                         Unselected ->
                             ( InGame { model | clickState = Selected x y }, Cmd.none )
 
@@ -212,7 +212,7 @@ update msg model =
 
                         _ ->
                             ( InGame model, Cmd.none )
-                    )
+                    ) else ( InGame model, Cmd.none )
 
                 Unclick ->
                     ( InGame { model | clickState = Unselected }, Cmd.none )
@@ -310,7 +310,7 @@ renderSquare x y highlighted elem =
                 silver
 
         piece =
-            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> List.singleton >> (\x -> img [x] [])) elem)
+            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> (\x -> img [x] []) >> List.singleton) elem)
 
         event =
             if highlighted then
@@ -323,8 +323,10 @@ renderSquare x y highlighted elem =
                 [ onClick event
                 , styles
                     [ backgroundColor base
-                    , minHeight (px 120)
-                    , minWidth (px 120)
+                    , minHeight (vw 8)
+                    , maxHeight (vw 8)
+                    , minWidth (vw 8)
+                    , maxWidth (vw 8)
                     ]
                 ]
                 piece
@@ -357,13 +359,31 @@ viewGame model =
 
                 Selected x y ->
                     ( x, y )
-    in
-        case model.self of
+        board = case model.self of
             White ->
                 renderBoard x y model.board
 
             Black ->
                 renderBoard x y (model.board |> List.reverse |> List.map List.reverse)
+        header = p [] [text (case model.turn of
+            White ->
+                "It is white's turn."
+            Black ->
+                "It is black's turn."
+        )]
+        has_moved = p [] [text (case model.clickState of
+            Unselected ->
+                if model.turn == model.self then "Please make a move." else "It is not your turn."
+            Selected _ _  ->
+                ""
+            Done ->
+                "You have made your move. Please wait for the next turn."
+        )]
+    in
+        div [styles [Css.padding (vw 5)]] 
+        [ div [styles [Css.padding (px 20 )]] [header , has_moved]
+        , board
+        ]
 
 
 view : Model -> Html Msg
