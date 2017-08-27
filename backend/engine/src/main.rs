@@ -367,8 +367,10 @@ fn main() {
         serde_json::to_writer(&mut output, &state).unwrap();
         writeln!(&mut output, "").unwrap();
         output.flush().unwrap();
+
         input.read_line(&mut buffer).unwrap();
         let Vote { action, .. } = serde_json::from_str(buffer.trim_right()).unwrap();
+        debug!("New move: {:?}", action);
         state.turn = process_move(&mut state.board, state.turn, action);
     }
 }

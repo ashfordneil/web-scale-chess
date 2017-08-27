@@ -276,6 +276,7 @@ impl<'a> State<'a> {
                 }
                 Err(e) => {
                     warn!("Badly formatted text received from client {}", e);
+                    debug!("Message from client: {}", text);
                     return Ok(());
                 }
             },
