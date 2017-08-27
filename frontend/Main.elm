@@ -177,7 +177,13 @@ update msg model =
                 Transmission msg ->
                     (case decodeString messageDecoder msg of
                         Ok update ->
-                            (InGame { board = update.board, turn = update.turn, url = url, self = team, clickState = Unselected}, Cmd.none)
+                            (InGame { board = update.board
+                                    , turn = update.turn
+                                    , url = url
+                                    , self = team
+                                    , clickState = Unselected}
+                            , Cmd.none)
+
                         _ ->
                             -- error handling is for weenies part 2
                             (Loading team url, Cmd.none)
@@ -192,18 +198,16 @@ update msg model =
                         Unselected ->
                             ( InGame { model | clickState = Selected x y }, Cmd.none )
 
-                        Selected x1 y1 ->
+                        Selected x0 y0 ->
                             ( InGame { model | clickState = Done }
-                            , WebSocket.send model.url
-                                (toString
-                                    (case model.self of
-                                        White ->
-                                            { from = [ x, y ], to = [ x1, y1 ] }
-
-                                        Black ->
-                                            { from = [ 8 - x, 8 - y ], to = [ 8 - x1, 8 - y1 ] }
-                                    )
-                                )
+                            , WebSocket.send model.url (
+                                let (old, new) = case model.self of
+                                    White ->
+                                        ([x0, y0], [x, y])
+                                    
+                                    Black ->
+                                        ([7 - x0, 7 - y0], [7 - x, 7 - y])
+                                in ("{\"action\": {\"from\": " ++ toString old ++ ", \"to\": " ++ toString new ++ "}, \"weight\": 1}"))
                             )
 
                         _ ->
@@ -216,7 +220,7 @@ update msg model =
                 Transmission msg ->
                     (case decodeString messageDecoder msg of
                         Ok update ->
-                            ( InGame { model | board = update.board, turn = update.turn }, Cmd.none )
+                            ( InGame { model | board = update.board, turn = update.turn, clickState = Unselected }, Cmd.none )
 
                         _ ->
                             -- error handling is for weenies
@@ -306,7 +310,7 @@ renderSquare x y highlighted elem =
                 silver
 
         piece =
-            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> List.singleton) elem)
+            Maybe.withDefault [] (Maybe.map (renderPiece >> src >> List.singleton >> (\x -> img [x] [])) elem)
 
         event =
             if highlighted then
@@ -323,7 +327,7 @@ renderSquare x y highlighted elem =
                     , minWidth (px 120)
                     ]
                 ]
-                [ img piece [] ]
+                piece
             ]
 
 
