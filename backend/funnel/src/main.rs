@@ -479,6 +479,7 @@ impl<'a> State<'a> {
                 voted.push(index);
                 votes += client.vote.as_ref().unwrap().weight;
             }
+            info!("Found vote for #{}: {:?}", index, client.vote);
         }
 
         // TODO: weighting
@@ -490,10 +491,13 @@ impl<'a> State<'a> {
         if voted.len() != 0 {
             let index = rand::thread_rng().gen_range(0, voted.len());
 
-            std::mem::swap(&mut vote, &mut self.clients.get_mut(index).unwrap().vote);
+            info!("Using vote for #{}", index);
+
+            vote = self.clients.get_mut(voted[index]).unwrap().vote.clone();
         }
 
         if vote.is_none() {
+            info!("No votes found apparently");
             vote = Some(Vote {
                 action: Action {
                     to: (0, 0),

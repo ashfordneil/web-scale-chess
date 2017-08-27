@@ -1,13 +1,13 @@
 #[macro_use]
 extern crate serde_derive;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Action {
     pub from: (u8, u8),
     pub to: (u8, u8),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Vote {
     pub action: Action,
     pub weight: u32,
