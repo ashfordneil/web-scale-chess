@@ -1,6 +1,7 @@
 extern crate slab;
 extern crate mio;
 extern crate tungstenite;
+extern crate url;
 
 #[macro_use]
 extern crate serde_derive;
@@ -21,7 +22,7 @@ use slab::Slab;
 use mio::*;
 use mio::net::{TcpListener,TcpStream};
 
-use tungstenite::{accept, WebSocket, Message};
+use tungstenite::{accept, WebSocket, Message, handshake};
 use tungstenite::HandshakeError::{self, Interrupted};
 use tungstenite::util::NonBlockingError;
 
@@ -41,6 +42,7 @@ use rand::Rng;
 struct Config {
     host: SocketAddr,
     upstream: SocketAddr,
+    upstream_is_websocket: bool,
     vote_length: Duration,
     vote_timeout: Duration,
     timeout_change: Duration,
@@ -209,6 +211,7 @@ impl<'a> State<'a> {
                     if let DownstreamMessage::VoteCall(ref mut vote_call) = message {
                         info!("Vote call!");
                         self.next_vote_send = Some(time::Instant::now() + (Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
+                        info!("Next vote send in {}", duration_millis(Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
                         vote_call.timeout = vote_call.timeout - duration_millis(self.config.timeout_change);
                     }
 
@@ -237,6 +240,57 @@ impl<'a> State<'a> {
                     buffer.clear();
                 },
                 Upstream::WebSocket { ref mut socket } => {
+                    let message = match socket.read_message() {
+                        Ok(message) => message,
+                        Err(e) => match e.into_non_blocking() {
+                            None => {
+                                return Ok(());
+                            }
+                            Some(e) => {
+                                panic!("Upstream websocket failed");
+                            },
+                        },
+                    };
+
+                    let mut message: DownstreamMessage = match serde_json::from_str(
+                            message.into_text().unwrap().trim_right()) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            warn!("Badly formatted message from upstream: {:?}", e);
+                            return Ok(());
+                        },
+                    };
+
+                    info!("Received from upstream: {:?}", message);
+
+                    if let DownstreamMessage::VoteCall(ref mut vote_call) = message {
+                        info!("Vote call!");
+                        self.next_vote_send = Some(time::Instant::now() + (Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
+                        info!("Next vote send in {}", duration_millis(Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
+                        vote_call.timeout = vote_call.timeout - duration_millis(self.config.timeout_change);
+                    }
+
+                    outgoing_message = serde_json::to_string(&message).unwrap();
+                        /*
+                        let result = client.websocket.write_message(Message::text(outgoing_message.clone()));
+                        if let Err(e) = result {
+                            match e.into_non_blocking() {
+                                None => self.poll.register(
+                                    client.websocket.get_ref(),
+                                    client_conn_token(index),
+                                    Ready::readable(),
+                                    PollOpt::edge()
+                                    )?,
+                                Some(e) => warn!("Error sending to websocket: {:?}", e),
+                            }
+                        }
+                        */
+
+                    if let DownstreamMessage::StateChange(state) = message {
+                        info!("UPDATING LATEST STATE");
+                        self.latest_state = Some(state);
+                        self.next_vote_start = Some(time::Instant::now() + self.config.vote_length);
+                    }
                 },
             }
 
@@ -454,12 +508,12 @@ impl<'a> State<'a> {
 
             let mut message = serde_json::to_string(&vote).unwrap();
             message.push('\n');
-            let bytes = message.as_bytes();
 
             println!("{}", message);
 
             match self.upstream {
                 Upstream::TcpSocket { ref socket, ref buffer } => {
+                    let bytes = message.as_bytes();
                     let mut sent = 0;
                     while sent < bytes.len() {
                         match socket.get_ref().write(&bytes[sent..]) {
@@ -474,7 +528,19 @@ impl<'a> State<'a> {
                         }
                     }
                 },
-                Upstream::WebSocket { ref socket } => {
+                Upstream::WebSocket { ref mut socket } => {
+                    let message = Message::text(message);
+                    socket.write_message(message);
+                    loop {
+                        let result = socket.write_pending();
+                        match result {
+                            Err(e) => match e.into_non_blocking() {
+                                None => continue,
+                                Some(e) => panic!("Upstream websocket failed {}", e),
+                            },
+                            Ok(()) => break,
+                        }
+                    }
                 },
             }
 
@@ -502,23 +568,49 @@ fn main() {
     let listener = TcpListener::bind(&config.host).expect("Could not bind to host");
     info!{"Listening on {}", config.host};
 
-    let upstream_conn = TcpStream::connect(&config.upstream).expect("Could not connect to upsteam");
-    info!{"Connected to upstream {}", config.upstream};
+    let upstream = if config.upstream_is_websocket {
+        let mut url = url::Url::parse("ws://1.0.0.0").unwrap();
+        url.set_ip_host(config.upstream.ip());
+        url.set_port(Some(config.upstream.port()));
+        let request = handshake::client::Request::from(url);
+        let upstream_conn = TcpStream::connect(&config.upstream).expect("Could not connect to upsteam WebSocket");
+
+        let mut websocket = tungstenite::client(request, upstream_conn);
+        while let Err(Interrupted(in_progress)) = websocket {
+            websocket = in_progress.handshake();
+        }
+        if let Err(HandshakeError::Failure(e)) = websocket {
+            panic!("Failed to connect to upstream websocket");
+        }
+        
+        Upstream::from_websocket(websocket.unwrap().0)
+    } else {
+        let upstream_conn = TcpStream::connect(&config.upstream).expect("Could not connect to upsteam TCP");
+        let upstream_reader = BufReader::new(upstream_conn);
+        info!{"Connected to upstream (TCP) {}", config.upstream};
+        Upstream::from_tcp(upstream_reader)
+    };
 
     let poll = Poll::new().unwrap();
     poll.register(&listener, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
-    poll.register(&upstream_conn, UPSTREAM, Ready::readable(), PollOpt::edge()).unwrap();
+
+    match upstream {
+        Upstream::TcpSocket { ref socket, .. } => {
+            poll.register(socket.get_ref(), UPSTREAM, Ready::readable(), PollOpt::edge()).unwrap();
+        },
+        Upstream::WebSocket { ref socket } => {
+            poll.register(socket.get_ref(), UPSTREAM, Ready::readable(), PollOpt::edge()).unwrap();
+        },
+    }
 
     let mut events = Events::with_capacity(1024);
-
-    let upstream_reader = BufReader::new(upstream_conn);
 
     let mut state = State {
         config: &config,
         poll: poll,
         listener: listener,
         clients: Slab::new(),
-        upstream: Upstream::from_tcp(upstream_reader),
+        upstream: upstream,
         latest_state: None,
         voting: false,
         next_vote_send: None,
@@ -533,19 +625,21 @@ fn main() {
         let time = time::Instant::now();
         let mut timeout = None;
 
-        let mut starting_yet = false;
-        if let Some(next_vote_start) = state.next_vote_start {
-            if time >= next_vote_start {
-                starting_yet = true;
-            } else {
-                starting_yet = false;
-                timeout = Some(next_vote_start - time);
+        if config.start_vote {
+            let mut starting_yet = false;
+            if let Some(next_vote_start) = state.next_vote_start {
+                if time >= next_vote_start {
+                    starting_yet = true;
+                } else {
+                    starting_yet = false;
+                    timeout = Some(next_vote_start - time);
+                }
             }
-        }
-        if starting_yet {
-            state.start_vote();
-            state.next_vote_start = None;
-            state.next_vote_send = Some(time + config.vote_timeout);
+            if starting_yet {
+                state.start_vote();
+                state.next_vote_start = None;
+                state.next_vote_send = Some(time + config.vote_timeout);
+            }
         }
 
         let mut sending_yet = false;
