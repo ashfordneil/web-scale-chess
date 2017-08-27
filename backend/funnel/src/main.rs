@@ -493,7 +493,7 @@ impl<'a> State<'a> {
 
             info!("Using vote for #{}", index);
 
-            vote = self.clients.get_mut(index).unwrap().vote.clone();
+            vote = self.clients.get_mut(voted[index]).unwrap().vote.clone();
         }
 
         if vote.is_none() {
