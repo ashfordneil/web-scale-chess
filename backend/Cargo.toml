@@ -7,5 +7,6 @@ authors = ["Neil Ashford <ashfordneil0@gmail.com>"]
 common = { path = "common" }
 funnel = { path = "funnel" }
 engine = { path = "engine" }
+bencher = { path = "bencher" }
 
 [workspace]
