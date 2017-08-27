@@ -25,7 +25,7 @@ use tungstenite::{accept, WebSocket, Message};
 use tungstenite::HandshakeError::{self, Interrupted};
 use tungstenite::util::NonBlockingError;
 
-use common::{Vote, StateChange};
+use common::{Vote, StateChange, Action};
 
 use std::fs::File;
 use std::path::Path;
@@ -61,9 +61,14 @@ impl Client {
     }
 }
 
-struct Upstream {
-    socket: BufReader<TcpStream>,
-    buffer: String,
+enum Upstream {
+    TcpSocket {
+        socket: BufReader<TcpStream>,
+        buffer: String,
+    },
+    WebSocket {
+        socket: WebSocket<TcpStream>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,10 +84,16 @@ enum DownstreamMessage {
 }
 
 impl Upstream {
-    fn new(socket: BufReader<TcpStream>) -> Upstream {
-        Upstream {
+    fn from_tcp(socket: BufReader<TcpStream>) -> Upstream {
+        Upstream::TcpSocket {
             socket: socket,
             buffer: String::new(),
+        }
+    }
+
+    fn from_websocket(socket: WebSocket<TcpStream>) -> Upstream {
+        Upstream::WebSocket {
+            socket: socket,
         }
     }
 }
@@ -171,34 +182,64 @@ impl<'a> State<'a> {
 
     fn upstream_event(&mut self, event: &Event) -> io::Result<()> {
         if event.readiness().is_readable() {
-            match self.upstream.socket.read_line(&mut self.upstream.buffer) {
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
-                result @ Err(_) => {
-                    result.expect("Error reading from upstream");
+            let mut outgoing_message = "".to_owned();
+            match self.upstream {
+                Upstream::TcpSocket { ref mut socket, ref mut buffer } => {
+                    match socket.read_line(buffer) {
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(()),
+                        result @ Err(_) => {
+                            result.expect("Error reading from upstream");
+                        },
+                        _ => (),
+                    }
+
+                    let mut message: DownstreamMessage = match serde_json::from_str(
+                            buffer.trim_right()) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            warn!("Badly formatted message from upstream: {:?}: \"{}\"",
+                                  e, buffer.trim_right());
+                            buffer.clear();
+                            return Ok(());
+                        },
+                    };
+
+                    info!("Received from upstream: {:?}", message);
+
+                    if let DownstreamMessage::VoteCall(ref mut vote_call) = message {
+                        info!("Vote call!");
+                        self.next_vote_send = Some(time::Instant::now() + (Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
+                        vote_call.timeout = vote_call.timeout - duration_millis(self.config.timeout_change);
+                    }
+
+                    outgoing_message = serde_json::to_string(&message).unwrap();
+                        /*
+                        let result = client.websocket.write_message(Message::text(outgoing_message.clone()));
+                        if let Err(e) = result {
+                            match e.into_non_blocking() {
+                                None => self.poll.register(
+                                    client.websocket.get_ref(),
+                                    client_conn_token(index),
+                                    Ready::readable(),
+                                    PollOpt::edge()
+                                    )?,
+                                Some(e) => warn!("Error sending to websocket: {:?}", e),
+                            }
+                        }
+                        */
+
+                    if let DownstreamMessage::StateChange(state) = message {
+                        info!("UPDATING LATEST STATE");
+                        self.latest_state = Some(state);
+                        self.next_vote_start = Some(time::Instant::now() + self.config.vote_length);
+                    }
+
+                    buffer.clear();
                 },
-                _ => (),
+                Upstream::WebSocket { ref mut socket } => {
+                },
             }
 
-            let mut message: DownstreamMessage = match serde_json::from_str(
-                    self.upstream.buffer.trim_right()) {
-                Ok(message) => message,
-                Err(e) => {
-                    warn!("Badly formatted message from upstream: {:?}: \"{}\"",
-                          e, self.upstream.buffer.trim_right());
-                    self.upstream.buffer.clear();
-                    return Ok(());
-                },
-            };
-
-            info!("Received from upstream: {:?}", message);
-
-            if let DownstreamMessage::VoteCall(ref mut vote_call) = message {
-                info!("Vote call!");
-                self.next_vote_send = Some(time::Instant::now() + (Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
-                vote_call.timeout = vote_call.timeout - duration_millis(self.config.timeout_change);
-            }
-
-            let outgoing_message = serde_json::to_string(&message).unwrap();
             let mut clients = Vec::new();
             for (index, _) in &self.clients {
                 clients.push(index);
@@ -206,28 +247,6 @@ impl<'a> State<'a> {
             for &index in &clients {
                 self.send_client_message(index, outgoing_message.clone());
             }
-                /*
-                let result = client.websocket.write_message(Message::text(outgoing_message.clone()));
-                if let Err(e) = result {
-                    match e.into_non_blocking() {
-                        None => self.poll.register(
-                            client.websocket.get_ref(),
-                            client_conn_token(index),
-                            Ready::readable(),
-                            PollOpt::edge()
-                            )?,
-                        Some(e) => warn!("Error sending to websocket: {:?}", e),
-                    }
-                }
-                */
-
-            if let DownstreamMessage::StateChange(state) = message {
-                info!("UPDATING LATEST STATE");
-                self.latest_state = Some(state);
-                self.next_vote_start = Some(time::Instant::now() + self.config.vote_length);
-            }
-
-            self.upstream.buffer.clear();
         }
 
         return Ok(());
@@ -399,29 +418,39 @@ impl<'a> State<'a> {
 
     fn send_vote_upstream(&mut self) {
         let mut voted = Vec::new();
+        let mut votes = 0;
 
         for (index, client) in &self.clients {
             if let Some(_) = client.vote {
                 voted.push(index);
+                votes += client.vote.as_ref().unwrap().weight;
             }
         }
 
         // TODO: weighting
-        // TODO: send when 0 votes
 
         info!("Sending votes for {} upstream", voted.len());
 
-        if voted.len() == 0 {
-            return;
+        let mut vote = None;
+
+        if voted.len() != 0 {
+            let index = rand::thread_rng().gen_range(0, voted.len());
+
+            std::mem::swap(&mut vote, &mut self.clients.get_mut(index).unwrap().vote);
         }
 
-        let index = rand::thread_rng().gen_range(0, voted.len());
-
-        let mut vote = None;
-        std::mem::swap(&mut vote, &mut self.clients.get_mut(index).unwrap().vote);
+        if vote.is_none() {
+            vote = Some(Vote {
+                action: Action {
+                    to: (0, 0),
+                    from: (0, 0),
+                },
+                weight: 0,
+            });
+        }
 
         if let Some(mut vote) = vote {
-            vote.weight = voted.len() as u32;
+            vote.weight = votes;
 
             let mut message = serde_json::to_string(&vote).unwrap();
             message.push('\n');
@@ -429,18 +458,24 @@ impl<'a> State<'a> {
 
             println!("{}", message);
 
-            let mut sent = 0;
-            while sent < bytes.len() {
-                match self.upstream.socket.get_ref().write(&bytes[sent..]) {
-                    Ok(size) => sent += size,
-                    Err(e) => match e.kind() {
-                        ErrorKind::WouldBlock => continue,
-                        _ => {
-                            warn!("Sending message upstream failed");
-                            break;
-                        },
+            match self.upstream {
+                Upstream::TcpSocket { ref socket, ref buffer } => {
+                    let mut sent = 0;
+                    while sent < bytes.len() {
+                        match socket.get_ref().write(&bytes[sent..]) {
+                            Ok(size) => sent += size,
+                            Err(e) => match e.kind() {
+                                ErrorKind::WouldBlock => continue,
+                                _ => {
+                                    warn!("Sending message upstream failed");
+                                    break;
+                                },
+                            }
+                        }
                     }
-                }
+                },
+                Upstream::WebSocket { ref socket } => {
+                },
             }
 
             info!("Votes sent!");
@@ -483,7 +518,7 @@ fn main() {
         poll: poll,
         listener: listener,
         clients: Slab::new(),
-        upstream: Upstream::new(upstream_reader),
+        upstream: Upstream::from_tcp(upstream_reader),
         latest_state: None,
         voting: false,
         next_vote_send: None,
