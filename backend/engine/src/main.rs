@@ -369,8 +369,10 @@ fn main() {
         output.flush().unwrap();
 
         input.read_line(&mut buffer).unwrap();
-        let Vote { action, .. } = serde_json::from_str(buffer.trim_right()).unwrap();
-        debug!("New move: {:?}", action);
-        state.turn = process_move(&mut state.board, state.turn, action);
+        let Vote { action, weight } = serde_json::from_str(buffer.trim_right()).unwrap();
+        debug!("New move: {:?} (weight = {})", action, weight);
+        if weight > 0 {
+            state.turn = process_move(&mut state.board, state.turn, action);
+        }
     }
 }
