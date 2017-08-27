@@ -41,9 +41,11 @@ use rand::Rng;
 struct Config {
     host: SocketAddr,
     upstream: SocketAddr,
-    vote_interval: Duration,
+    vote_length: Duration,
+    vote_timeout: Duration,
+    timeout_change: Duration,
+    start_vote: bool,
 }
-
 
 struct Client {
     vote: Option<Vote>,
@@ -66,7 +68,7 @@ struct Upstream {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct VoteCall {
-    vote_call: (),
+    timeout: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -85,14 +87,16 @@ impl Upstream {
     }
 }
 
-struct State {
+struct State<'a> {
+    config: &'a Config,
     poll: Poll,
     listener: TcpListener,
     clients: Slab<Client>,
     upstream: Upstream,
     latest_state: Option<StateChange>,
     voting: bool,
-    next_vote: time::Instant,
+    next_vote_send: Option<time::Instant>,
+    next_vote_start: Option<time::Instant>,
 }
 
 fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
@@ -103,6 +107,9 @@ fn read_config<P: AsRef<Path> + Clone>(path: P) -> Config {
     toml::from_str(&contents).expect("Format file incorrectly formatted")
 }
 
+fn duration_millis(d: Duration) -> u32 {
+    d.as_secs() as u32 * 1000 + d.subsec_nanos() / 1_000_000
+}
 
 const SERVER: Token = Token(0);
 const UPSTREAM: Token = Token(1);
@@ -120,7 +127,7 @@ fn is_client(token: Token) -> bool {
     token.0 >= FIRST_CLIENT.0
 }
 
-impl State {
+impl<'a> State<'a> {
     fn new_client(&mut self) -> Result<(), tungstenite::error::Error> {
         let stream = self.listener.accept()?.0;
 
@@ -172,7 +179,7 @@ impl State {
                 _ => (),
             }
 
-            let message: DownstreamMessage = match serde_json::from_str(
+            let mut message: DownstreamMessage = match serde_json::from_str(
                     self.upstream.buffer.trim_right()) {
                 Ok(message) => message,
                 Err(e) => {
@@ -185,8 +192,21 @@ impl State {
 
             info!("Received from upstream: {:?}", message);
 
+            if let DownstreamMessage::VoteCall(ref mut vote_call) = message {
+                info!("Vote call!");
+                self.next_vote_send = Some(time::Instant::now() + (Duration::from_millis(vote_call.timeout as u64) - self.config.timeout_change));
+                vote_call.timeout = vote_call.timeout - duration_millis(self.config.timeout_change);
+            }
+
             let outgoing_message = serde_json::to_string(&message).unwrap();
-            for (index, client) in &mut self.clients {
+            let mut clients = Vec::new();
+            for (index, _) in &self.clients {
+                clients.push(index);
+            }
+            for &index in &clients {
+                self.send_client_message(index, outgoing_message.clone());
+            }
+                /*
                 let result = client.websocket.write_message(Message::text(outgoing_message.clone()));
                 if let Err(e) = result {
                     match e.into_non_blocking() {
@@ -199,11 +219,12 @@ impl State {
                         Some(e) => warn!("Error sending to websocket: {:?}", e),
                     }
                 }
-            }
+                */
 
             if let DownstreamMessage::StateChange(state) = message {
-                println!("UPDATING LATEST STATE");
+                info!("UPDATING LATEST STATE");
                 self.latest_state = Some(state);
+                self.next_vote_start = Some(time::Instant::now() + self.config.vote_length);
             }
 
             self.upstream.buffer.clear();
@@ -361,6 +382,20 @@ impl State {
         Ok(())
     }
 
+    fn start_vote(&mut self) {
+        info!("Starting a vote call");
+        let vote_call = VoteCall { timeout: duration_millis(self.config.vote_timeout) };
+        let vote_message = DownstreamMessage::VoteCall(vote_call);
+        let string = serde_json::to_string(&vote_message).unwrap();
+        let mut clients = Vec::new();
+        for (index, _) in &self.clients {
+            clients.push(index);
+        }
+        for &index in &clients {
+            self.send_client_message(index, string.clone());
+        }
+    }
+
     fn send_vote_upstream(&mut self) {
         let mut voted = Vec::new();
 
@@ -373,11 +408,11 @@ impl State {
         // TODO: weighting
         // TODO: send when 0 votes
 
+        info!("Sending votes for {} upstream", voted.len());
+
         if voted.len() == 0 {
             return;
         }
-
-        info!("Sending votes for {} upstream", voted.len());
 
         let index = rand::thread_rng().gen_range(0, voted.len());
 
@@ -443,27 +478,69 @@ fn main() {
     let upstream_reader = BufReader::new(upstream_conn);
 
     let mut state = State {
+        config: &config,
         poll: poll,
         listener: listener,
         clients: Slab::new(),
         upstream: Upstream::new(upstream_reader),
         latest_state: None,
         voting: false,
-        next_vote: time::Instant::now() + config.vote_interval,
+        next_vote_send: None,
+        next_vote_start: None,
     };
 
+    if config.start_vote {
+        state.next_vote_start = Some(time::Instant::now() + config.vote_length);
+    }
 
     loop {
         let time = time::Instant::now();
+        let mut timeout = None;
+
+        let mut starting_yet = false;
+        if let Some(next_vote_start) = state.next_vote_start {
+            if time >= next_vote_start {
+                starting_yet = true;
+            } else {
+                starting_yet = false;
+                timeout = Some(next_vote_start - time);
+            }
+        }
+        if starting_yet {
+            state.start_vote();
+            state.next_vote_start = None;
+            state.next_vote_send = Some(time + config.vote_timeout);
+        }
+
+        let mut sending_yet = false;
+        if let Some(next_vote_send) = state.next_vote_send {
+            if time >= next_vote_send {
+                sending_yet = true;
+            } else {
+                sending_yet = false;
+                timeout = Some(next_vote_send - time);
+            }
+        }
+        if sending_yet {
+            info!("About to send vote");
+            state.send_vote_upstream();
+            state.next_vote_send = None;
+        }
+/*
+        if state.next_vote + config.vote_timeout > time {
+            timeout = Some(state.next_vote + config.vote_timeout - time);
+        }
+
         let mut time_until_vote;
         if time > state.next_vote {
-            state.next_vote += config.vote_interval;
+            state.next_vote += config.vote_length;
             time_until_vote = state.next_vote - time::Instant::now();
             state.send_vote_upstream();
         }
         time_until_vote = state.next_vote - time::Instant::now();
+        */
 
-        state.poll.poll(&mut events, Some(time_until_vote)).unwrap();
+        state.poll.poll(&mut events, timeout).unwrap();
 
         for event in &events {
             match event.token() {
