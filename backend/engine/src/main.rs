@@ -326,27 +326,28 @@ fn process_sans_check_check(
                 {
                     // pawn just moving forwards - twice
                     debug!("Pawn moving 2 squares");
-                } else if dx.abs() == 1 {
-                    debug!("Pawn capturing");
-                    match colour {
-                        PieceColour::White => if dy != -1 ||
-                            board[y1 as usize][x1 as usize].is_none() ||
-                            board[y1 as usize][x1 as usize].unwrap().colour != PieceColour::Black
-                        {
-                            info!("Pawn can only move in the X direction if its capturing");
-                            return false;
-                        },
-                        PieceColour::Black => if dy != 1 ||
-                            board[y1 as usize][x1 as usize].is_none() ||
+                } else {
+                    info!("Pawns cannot move like that");
+                    return false;
+                }
+            } else if dx.abs() == 1 {
+                debug!("Pawn capturing");
+                match colour {
+                    PieceColour::White => if dy != -1 ||
+                        board[y1 as usize][x1 as usize].is_none() ||
+                        board[y1 as usize][x1 as usize].unwrap().colour != PieceColour::Black
+                    {
+                        info!("Pawn can only move in the X direction if its capturing");
+                        return false;
+                    },
+                    PieceColour::Black => {
+                        if dy != 1 || board[y1 as usize][x1 as usize].is_none() ||
                             board[y1 as usize][x1 as usize].unwrap().colour != PieceColour::White
                         {
                             info!("Pawn can only move in the X direction if its capturing");
                             return false;
-                        },
+                        }
                     }
-                } else {
-                    info!("Pawns cannot move like that");
-                    return false;
                 }
             } else {
                 info!("Pawns cannot move like that");
